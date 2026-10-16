@@ -2,7 +2,7 @@ name: Rebuild static backup
 
 on:
   push:
-分支: [main]
+    branches: [main]
   schedule:
     # 22:45 UTC = 06:45 Asia/Shanghai next day, after the main site's 06:30 publish.
     - cron: "45 22 * * *"
