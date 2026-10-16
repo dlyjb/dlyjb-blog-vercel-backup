@@ -1,0 +1,34 @@
+name: Rebuild static backup
+
+on:
+  push:
+分支: [main]
+  schedule:
+    # 22:45 UTC = 06:45 Asia/Shanghai next day, after the main site's 06:30 publish.
+    - cron: "45 22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate dist/
+        run: python3 generate_static.py
+      - name: Commit dist/ changes if any
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist
+          if git diff --cached --quiet; then
+            echo "No dist/ changes."
+          else
+            git commit -m "chore: regenerate static backup"
+            git push
+          fi
