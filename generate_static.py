@@ -19,7 +19,10 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
@@ -31,6 +34,13 @@ except ImportError:  # pragma: no cover - fallback to stdlib
 
 PARENT_PAGE_ID = "3f8e7eff-cf45-81b4-b37d-e6b930e7f48b"
 API_URL = "https://dlyjb.notion.site/api/v3/loadPageChunk"
+# Cloudflare (error 1010) rejects requests whose User-Agent looks like a
+# bare script (e.g. urllib's default "Python-urllib/3.x") with HTTP 403.
+# In GitHub Actions, setup-python ships a clean Python WITHOUT `requests`,
+# so the script falls back to urllib — without this header every run
+# failed in ~1s with exit code 1. A Mozilla-compatible UA gets a 200.
+USER_AGENT = ("Mozilla/5.0 (compatible; dlyjb-blog-vercel-backup/1.0; "
+              "+https://dgy.qzz.io)")
 WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
 SITE_URL = "https://dgy.qzz.io"
 UUID_RE = re.compile(
@@ -47,17 +57,43 @@ def esc(s):
 
 def post_json(url, payload):
     data = json.dumps(payload).encode("utf-8")
-    if requests is not None:
-        r = requests.post(url, data=data,
-                          headers={"Content-Type": "application/json"},
-                          timeout=60)
-        if r.status_code != 200:
-            raise RuntimeError(f"notion api {r.status_code}")
-        return r.json()
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+    last_err = None
+    # Request chain: requests -> curl -> urllib. The stdlib urllib path
+    # frequently hits truncated reads (IncompleteRead) on Notion's chunked
+    # responses, and GitHub Actions' clean Python has no `requests`
+    # installed — so without the curl middle step every run died in ~1s.
+    # curl is preinstalled on ubuntu-latest runners and reads the same
+    # endpoint reliably. Retry transient failures a few times.
+    for attempt in range(3):
+        try:
+            if requests is not None:
+                r = requests.post(url, data=data, headers=headers, timeout=60)
+                if r.status_code != 200:
+                    raise RuntimeError(f"notion api {r.status_code}")
+                return r.json()
+            if shutil.which("curl"):
+                cp = subprocess.run(
+                    ["curl", "-sS", "-X", "POST", url,
+                     "-H", "Content-Type: application/json",
+                     "-H", "User-Agent: " + USER_AGENT,
+                     "--data-binary", "@-", "--max-time", "60"],
+                    input=data, capture_output=True, timeout=90)
+                if cp.returncode != 0:
+                    raise RuntimeError(
+                        "curl exit %d: %s" % (
+                            cp.returncode,
+                            cp.stderr.decode("utf-8", "replace")[:200]))
+                return json.loads(cp.stdout.decode("utf-8"))
+            req = urllib.request.Request(url, data=data, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:  # HTTPError/URLError/IncompleteRead/JSON errors
+            last_err = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    code = getattr(last_err, "code", None)
+    raise RuntimeError(f"notion api {code or last_err}") from last_err
 
 
 def fetch_blocks(page_id):
